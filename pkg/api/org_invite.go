@@ -38,6 +38,10 @@ func AddOrgInvite(c *middleware.Context, inviteDto dtos.AddInviteForm) Response 
 		if err != m.ErrUserNotFound {
 			return ApiError(500, "Failed to query db for existing user check", err)
 		}
+
+		if setting.DisableLoginForm {
+			return ApiError(401, "User could not be found", nil)
+		}
 	} else {
 		return inviteExistingUserToOrg(c, userQuery.Result, &inviteDto)
 	}
@@ -72,6 +76,11 @@ func AddOrgInvite(c *middleware.Context, inviteDto dtos.AddInviteForm) Response 
 
 		if err := bus.Dispatch(&emailCmd); err != nil {
 			return ApiError(500, "Failed to send email invite", err)
+		}
+
+		emailSentCmd := m.UpdateTempUserWithEmailSentCommand{Code: cmd.Result.Code}
+		if err := bus.Dispatch(&emailSentCmd); err != nil {
+			return ApiError(500, "Failed to update invite with email sent info", err)
 		}
 
 		return ApiSuccess(fmt.Sprintf("Sent invite to %s", inviteDto.LoginOrEmail))

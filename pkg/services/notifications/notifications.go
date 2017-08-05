@@ -1,7 +1,7 @@
 package notifications
 
 import (
-	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"html/template"
@@ -29,7 +29,9 @@ func Init() error {
 	bus.AddHandler("email", validateResetPasswordCode)
 	bus.AddHandler("email", sendEmailCommandHandler)
 
-	bus.AddHandler("webhook", sendWebhook)
+	bus.AddCtxHandler("email", sendEmailCommandHandlerSync)
+
+	bus.AddCtxHandler("webhook", SendWebhookSync)
 
 	bus.AddEventListener(signUpStartedHandler)
 	bus.AddEventListener(signUpCompletedHandler)
@@ -46,7 +48,7 @@ func Init() error {
 	}
 
 	if !util.IsEmail(setting.Smtp.FromAddress) {
-		return errors.New("Invalid email address for smpt from_adress config")
+		return errors.New("Invalid email address for SMTP from_address config")
 	}
 
 	if setting.EmailCodeValidMinutes == 0 {
@@ -56,15 +58,15 @@ func Init() error {
 	return nil
 }
 
-func sendWebhook(cmd *m.SendWebhook) error {
-	addToWebhookQueue(&Webhook{
-		Url:      cmd.Url,
-		User:     cmd.User,
-		Password: cmd.Password,
-		Body:     cmd.Body,
+func SendWebhookSync(ctx context.Context, cmd *m.SendWebhookSync) error {
+	return sendWebRequestSync(ctx, &Webhook{
+		Url:        cmd.Url,
+		User:       cmd.User,
+		Password:   cmd.Password,
+		Body:       cmd.Body,
+		HttpMethod: cmd.HttpMethod,
+		HttpHeader: cmd.HttpHeader,
 	})
-
-	return nil
 }
 
 func subjectTemplateFunc(obj map[string]interface{}, value string) string {
@@ -72,50 +74,33 @@ func subjectTemplateFunc(obj map[string]interface{}, value string) string {
 	return ""
 }
 
-func sendEmailCommandHandler(cmd *m.SendEmailCommand) error {
-	if !setting.Smtp.Enabled {
-		return errors.New("Grafana mailing/smtp options not configured, contact your Grafana admin")
-	}
-
-	var buffer bytes.Buffer
-	var err error
-	var subjectText interface{}
-
-	data := cmd.Data
-	if data == nil {
-		data = make(map[string]interface{}, 10)
-	}
-
-	setDefaultTemplateData(data, nil)
-	err = mailTemplates.ExecuteTemplate(&buffer, cmd.Template, data)
-	if err != nil {
-		return err
-	}
-
-	subjectData := data["Subject"].(map[string]interface{})
-	subjectText, hasSubject := subjectData["value"]
-
-	if !hasSubject {
-		return errors.New(fmt.Sprintf("Missing subject in Template %s", cmd.Template))
-	}
-
-	subjectTmpl, err := template.New("subject").Parse(subjectText.(string))
-	if err != nil {
-		return err
-	}
-
-	var subjectBuffer bytes.Buffer
-	err = subjectTmpl.ExecuteTemplate(&subjectBuffer, "subject", data)
-	if err != nil {
-		return err
-	}
-
-	addToMailQueue(&Message{
-		To:      cmd.To,
-		From:    setting.Smtp.FromAddress,
-		Subject: subjectBuffer.String(),
-		Body:    buffer.String(),
+func sendEmailCommandHandlerSync(ctx context.Context, cmd *m.SendEmailCommandSync) error {
+	message, err := buildEmailMessage(&m.SendEmailCommand{
+		Data:         cmd.Data,
+		Info:         cmd.Info,
+		Template:     cmd.Template,
+		To:           cmd.To,
+		EmbededFiles: cmd.EmbededFiles,
+		Subject:      cmd.Subject,
 	})
+
+	if err != nil {
+		return err
+	}
+
+	_, err = send(message)
+
+	return err
+}
+
+func sendEmailCommandHandler(cmd *m.SendEmailCommand) error {
+	message, err := buildEmailMessage(cmd)
+
+	if err != nil {
+		return err
+	}
+
+	addToMailQueue(message)
 
 	return nil
 }
@@ -161,7 +146,7 @@ func signUpStartedHandler(evt *events.SignUpStarted) error {
 		return nil
 	}
 
-	return sendEmailCommandHandler(&m.SendEmailCommand{
+	err := sendEmailCommandHandler(&m.SendEmailCommand{
 		To:       []string{evt.Email},
 		Template: tmplSignUpStarted,
 		Data: map[string]interface{}{
@@ -170,6 +155,12 @@ func signUpStartedHandler(evt *events.SignUpStarted) error {
 			"SignUpUrl": setting.ToAbsUrl(fmt.Sprintf("signup/?email=%s&code=%s", url.QueryEscape(evt.Email), url.QueryEscape(evt.Code))),
 		},
 	})
+	if err != nil {
+		return err
+	}
+
+	emailSentCmd := m.UpdateTempUserWithEmailSentCommand{Code: evt.Code}
+	return bus.Dispatch(&emailSentCmd)
 }
 
 func signUpCompletedHandler(evt *events.SignUpCompleted) error {

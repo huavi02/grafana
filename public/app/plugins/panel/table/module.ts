@@ -8,7 +8,9 @@ import * as FileExport from 'app/core/utils/file_export';
 import {MetricsPanelCtrl} from 'app/plugins/sdk';
 import {transformDataToTable} from './transformers';
 import {tablePanelEditor} from './editor';
+import {columnOptionsTab} from './column_options';
 import {TableRenderer} from './renderer';
+import Drop from 'tether-drop';
 
 class TablePanelCtrl extends MetricsPanelCtrl {
   static templateUrl = 'module.html';
@@ -16,6 +18,7 @@ class TablePanelCtrl extends MetricsPanelCtrl {
   pageIndex: number;
   dataRaw: any;
   table: any;
+  renderer: any;
 
   panelDefaults = {
     targets: [{}],
@@ -26,11 +29,13 @@ class TablePanelCtrl extends MetricsPanelCtrl {
       {
         type: 'date',
         pattern: 'Time',
+        alias: 'Time',
         dateFormat: 'YYYY-MM-DD HH:mm:ss',
       },
       {
         unit: 'short',
         type: 'number',
+        alias: '',
         decimals: 2,
         colors: ["rgba(245, 54, 54, 0.9)", "rgba(237, 129, 40, 0.89)", "rgba(50, 172, 45, 0.97)"],
         colorMode: null,
@@ -45,7 +50,7 @@ class TablePanelCtrl extends MetricsPanelCtrl {
   };
 
   /** @ngInject */
-  constructor($scope, $injector, private annotationsSrv, private $sanitize) {
+  constructor($scope, $injector, templateSrv, private annotationsSrv, private $sanitize) {
     super($scope, $injector);
     this.pageIndex = 0;
 
@@ -67,6 +72,7 @@ class TablePanelCtrl extends MetricsPanelCtrl {
 
   onInitEditMode() {
     this.addEditorTab('Options', tablePanelEditor, 2);
+    this.addEditorTab('Column Styles', columnOptionsTab, 3);
   }
 
   onInitPanelActions(actions) {
@@ -117,6 +123,9 @@ class TablePanelCtrl extends MetricsPanelCtrl {
   render() {
     this.table = transformDataToTable(this.dataRaw, this.panel);
     this.table.sort(this.panel.sort);
+
+    this.renderer = new TableRenderer(this.panel, this.table, this.dashboard.isTimezoneUtc(), this.$sanitize, this.templateSrv);
+
     return super.render(this.table);
   }
 
@@ -140,8 +149,7 @@ class TablePanelCtrl extends MetricsPanelCtrl {
   }
 
   exportCsv() {
-    var renderer = new TableRenderer(this.panel, this.table, this.dashboard.isTimezoneUtc(), this.$sanitize);
-    FileExport.exportTableDataToCsv(renderer.render_values());
+    FileExport.exportTableDataToCsv(this.renderer.render_values());
   }
 
   link(scope, elem, attrs, ctrl) {
@@ -161,9 +169,9 @@ class TablePanelCtrl extends MetricsPanelCtrl {
     }
 
     function appendTableRows(tbodyElem) {
-      var renderer = new TableRenderer(panel, data, ctrl.dashboard.isTimezoneUtc(), ctrl.$sanitize);
+      ctrl.renderer.setTable(data);
       tbodyElem.empty();
-      tbodyElem.html(renderer.render(ctrl.pageIndex));
+      tbodyElem.html(ctrl.renderer.render(ctrl.pageIndex));
     }
 
     function switchPage(e) {
@@ -210,10 +218,16 @@ class TablePanelCtrl extends MetricsPanelCtrl {
       rootElem.css({'max-height': panel.scroll ? getTableHeight() : '' });
     }
 
+    // hook up link tooltips
+    elem.tooltip({
+      selector: '[data-link-tooltip]'
+    });
+
     elem.on('click', '.table-panel-page-link', switchPage);
 
-    scope.$on('$destroy', function() {
+    var unbindDestroy = scope.$on('$destroy', function() {
       elem.off('click', '.table-panel-page-link');
+      unbindDestroy();
     });
 
     ctrl.events.on('render', function(renderData) {

@@ -4,8 +4,10 @@ import angular from 'angular';
 import _ from 'lodash';
 import moment from 'moment';
 
+import kbn from 'app/core/utils/kbn';
 import * as dateMath from 'app/core/utils/datemath';
 import PrometheusMetricFindQuery from './metric_find_query';
+import TableModel from 'app/core/table_model';
 
 var durationSplitRegexp = /(\d+)(ms|s|m|h|d|w|M|y)/;
 
@@ -19,7 +21,6 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
   this.directUrl = instanceSettings.directUrl;
   this.basicAuth = instanceSettings.basicAuth;
   this.withCredentials = instanceSettings.withCredentials;
-  this.lastErrors = {};
 
   this._request = function(method, url, requestId) {
     var options: any = {
@@ -58,6 +59,10 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
     return escapedValues.join('|');
   };
 
+  this.targetContainsTemplate = function(target) {
+    return templateSrv.variableExists(target.expr);
+  };
+
   // Called once per panel (graph)
   this.query = function(options) {
     var self = this;
@@ -69,9 +74,9 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
 
     options = _.clone(options);
 
-    _.each(options.targets, target => {
+    for (let target of options.targets) {
       if (!target.expr || target.hide) {
-        return;
+        continue;
       }
 
       activeTargets.push(target);
@@ -84,45 +89,55 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
       var intervalFactor = target.intervalFactor || 1;
       target.step = query.step = this.calculateInterval(interval, intervalFactor);
       var range = Math.ceil(end - start);
-      // Prometheus drop query if range/step > 11000
-      // calibrate step if it is too big
-      if (query.step !== 0 && range / query.step > 11000) {
-        target.step = query.step = Math.ceil(range / 11000);
-      }
-
+      target.step = query.step = this.adjustStep(query.step, this.intervalSeconds(options.interval), range);
       queries.push(query);
-    });
+    }
 
     // No valid targets, return the empty result to save a round trip.
     if (_.isEmpty(queries)) {
-      var d = $q.defer();
-      d.resolve({ data: [] });
-      return d.promise;
+      return $q.when({ data: [] });
     }
 
     var allQueryPromise = _.map(queries, query => {
       return this.performTimeSeriesQuery(query, start, end);
     });
 
-    return $q.all(allQueryPromise).then(function(allResponse) {
+    return $q.all(allQueryPromise).then(responseList => {
       var result = [];
+      var index = 0;
 
-      _.each(allResponse, function(response, index) {
+      _.each(responseList, (response, index) => {
         if (response.status === 'error') {
-          self.lastErrors.query = response.error;
           throw response.error;
         }
-        delete self.lastErrors.query;
-        _.each(response.data.data.result, function(metricData) {
-          result.push(self.transformMetricData(metricData, activeTargets[index], start, end));
-        });
+
+        if (activeTargets[index].format === "table") {
+          result.push(self.transformMetricDataToTable(response.data.data.result));
+        } else {
+          for (let metricData of response.data.data.result) {
+            result.push(self.transformMetricData(metricData, activeTargets[index], start, end));
+          }
+        }
       });
 
       return { data: result };
     });
   };
 
+  this.adjustStep = function(step, autoStep, range) {
+    // Prometheus drop query if range/step > 11000
+    // calibrate step if it is too big
+    if (step !== 0 && range / step > 11000) {
+      return Math.ceil(range / 11000);
+    }
+    return Math.max(step, autoStep);
+  };
+
   this.performTimeSeriesQuery = function(query, start, end) {
+    if (start > end) {
+      throw { message: 'Invalid time range' };
+    }
+
     var url = '/api/v1/query_range?query=' + encodeURIComponent(query.expr) + '&start=' + start + '&end=' + end + '&step=' + query.step;
     return this._request('GET', url, query.requestId);
   };
@@ -167,15 +182,19 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
       return $q.reject(err);
     }
 
-    var query = {
-      expr: interpolated,
-      step: '60s'
-    };
+    var step = '60s';
+    if (annotation.step) {
+      step = templateSrv.replace(annotation.step);
+    }
 
     var start = this.getPrometheusTime(options.range.from, false);
     var end = this.getPrometheusTime(options.range.to, true);
-    var self = this;
+    var query = {
+      expr: interpolated,
+      step: this.adjustStep(kbn.interval_to_seconds(step), 0, Math.ceil(end - start)) + 's'
+    };
 
+    var self = this;
     return this.performTimeSeriesQuery(query, start, end).then(function(results) {
       var eventList = [];
       tagKeys = tagKeys.split(',');
@@ -186,11 +205,11 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
           return _.includes(tagKeys, k);
         }).value();
 
-        _.each(series.values, function(value) {
+        for (let value of series.values) {
           if (value[1] === '1') {
             var event = {
               annotation: annotation,
-              time: Math.floor(value[0]) * 1000,
+              time: Math.floor(parseFloat(value[0])) * 1000,
               title: self.renderTemplate(titleFormat, series.metric),
               tags: tags,
               text: self.renderTemplate(textFormat, series.metric)
@@ -198,7 +217,7 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
 
             eventList.push(event);
           }
-        });
+        }
       });
 
       return eventList;
@@ -212,6 +231,10 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
   };
 
   this.calculateInterval = function(interval, intervalFactor) {
+    return Math.ceil(this.intervalSeconds(interval) * intervalFactor);
+  };
+
+  this.intervalSeconds = function(interval) {
     var m = interval.match(durationSplitRegexp);
     var dur = moment.duration(parseInt(m[1]), m[2]);
     var sec = dur.asSeconds();
@@ -219,7 +242,7 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
       sec = 1;
     }
 
-    return Math.ceil(sec * intervalFactor);
+    return sec;
   };
 
   this.transformMetricData = function(md, options, start, end) {
@@ -230,26 +253,78 @@ export function PrometheusDatasource(instanceSettings, $q, backendSrv, templateS
 
     var stepMs = parseInt(options.step) * 1000;
     var baseTimestamp = start * 1000;
-    _.each(md.values, function(value) {
+    for (let value of md.values) {
       var dp_value = parseFloat(value[1]);
       if (_.isNaN(dp_value)) {
         dp_value = null;
       }
 
-      var timestamp = value[0] * 1000;
-      for (var t = baseTimestamp; t < timestamp; t += stepMs) {
+      var timestamp = parseFloat(value[0]) * 1000;
+      for (let t = baseTimestamp; t < timestamp; t += stepMs) {
         dps.push([null, t]);
       }
       baseTimestamp = timestamp + stepMs;
       dps.push([dp_value, timestamp]);
-    });
+    }
 
     var endTimestamp = end * 1000;
-    for (var t = baseTimestamp; t <= endTimestamp; t += stepMs) {
+    for (let t = baseTimestamp; t <= endTimestamp; t += stepMs) {
       dps.push([null, t]);
     }
 
     return { target: metricLabel, datapoints: dps };
+  };
+
+  this.transformMetricDataToTable = function(md) {
+    var table = new TableModel();
+    var i, j;
+    var metricLabels = {};
+
+    if (md.length === 0) {
+      return table;
+    }
+
+    // Collect all labels across all metrics
+    _.each(md, function(series) {
+      for (var label in series.metric) {
+        if (!metricLabels.hasOwnProperty(label)) {
+          metricLabels[label] = 1;
+        }
+      }
+    });
+
+    // Sort metric labels, create columns for them and record their index
+    var sortedLabels = _.keys(metricLabels).sort();
+    table.columns.push({text: 'Time', type: 'time'});
+    _.each(sortedLabels, function(label, labelIndex) {
+      metricLabels[label] = labelIndex + 1;
+      table.columns.push({text: label});
+    });
+    table.columns.push({text: 'Value'});
+
+    // Populate rows, set value to empty string when label not present.
+    _.each(md, function(series) {
+      if (series.values) {
+        for (i = 0; i < series.values.length; i++) {
+          var values = series.values[i];
+          var reordered: any = [values[0] * 1000];
+          if (series.metric) {
+            for (j = 0; j < sortedLabels.length; j++) {
+              var label = sortedLabels[j];
+              if (series.metric.hasOwnProperty(label)) {
+                reordered.push(series.metric[label]);
+              } else {
+                reordered.push('');
+              }
+            }
+          }
+          reordered.push(parseFloat(values[1]));
+          table.rows.push(reordered);
+        }
+      }
+    });
+
+    return table;
   };
 
   this.createMetricLabel = function(labelData, options) {

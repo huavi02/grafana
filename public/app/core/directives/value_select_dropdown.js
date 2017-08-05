@@ -75,7 +75,7 @@ function (angular, _, coreModule) {
       tag.selected = !tag.selected;
       var tagValuesPromise;
       if (!tag.values) {
-        tagValuesPromise = vm.getValuesForTag({tagKey: tag.text});
+        tagValuesPromise = vm.variable.getValuesForTag(tag.text);
       } else {
         tagValuesPromise = $q.when(tag.values);
       }
@@ -225,7 +225,7 @@ function (angular, _, coreModule) {
 
   coreModule.default.directive('valueSelectDropdown', function($compile, $window, $timeout, $rootScope) {
     return {
-      scope: { variable: "=", onUpdated: "&", getValuesForTag: "&" },
+      scope: { variable: "=", onUpdated: "&"},
       templateUrl: 'public/app/partials/valueSelectDropdown.html',
       controller: 'ValueSelectDropdownCtrl',
       controllerAs: 'vm',
@@ -236,7 +236,7 @@ function (angular, _, coreModule) {
         var inputEl = elem.find('input');
 
         function openDropdown() {
-          inputEl.css('width', Math.max(linkEl.width(), 30) + 'px');
+          inputEl.css('width', Math.max(linkEl.width(), 80) + 'px');
 
           inputEl.show();
           linkEl.hide();

@@ -1,16 +1,11 @@
 define([
   'angular',
+  'lodash',
   '../core_module',
   'app/core/config',
 ],
-function (angular, coreModule, config) {
+function (angular, _, coreModule, config) {
   'use strict';
-
-  var failCodes = {
-    "1000": "Required Github team membership not fulfilled",
-    "1001": "Required Github organization membership not fulfilled",
-    "1002": "Required email domain not fulfilled",
-  };
 
   coreModule.default.controller('LoginCtrl', function($scope, backendSrv, contextSrv, $location) {
     $scope.formModel = {
@@ -21,12 +16,10 @@ function (angular, coreModule, config) {
 
     contextSrv.sidemenu = false;
 
-    $scope.googleAuthEnabled = config.googleAuthEnabled;
-    $scope.githubAuthEnabled = config.githubAuthEnabled;
-    $scope.oauthEnabled = config.githubAuthEnabled || config.googleAuthEnabled || config.genericOAuthEnabled;
-    $scope.allowUserPassLogin = config.allowUserPassLogin;
-    $scope.genericOAuthEnabled = config.genericOAuthEnabled;
-    $scope.oauthProviderName = config.oauthProviderName;
+    $scope.oauth = config.oauth;
+    $scope.oauthEnabled = _.keys(config.oauth).length > 0;
+
+    $scope.disableLoginForm = config.disableLoginForm;
     $scope.disableUserSignUp = config.disableUserSignUp;
     $scope.loginHint     = config.loginHint;
 
@@ -36,11 +29,8 @@ function (angular, coreModule, config) {
     $scope.init = function() {
       $scope.$watch("loginMode", $scope.loginModeChanged);
 
-      var params = $location.search();
-      if (params.failCode) {
-        $scope.appEvent('alert-warning', ['Login Failed', failCodes[params.failCode]]);
-        delete params.failedMsg;
-        $location.search(params);
+      if (config.loginError) {
+        $scope.appEvent('alert-warning', ['Login Failed', config.loginError]);
       }
     };
 
